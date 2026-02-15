@@ -1,0 +1,14 @@
+# Windows device listing + scanning
+pywin32>=306
+
+# OCR (ocr_to_markdown.py)
+Pillow>=10.0.0
+pytesseract>=0.3.10
+
+# LLM OCR (llm_ocr_to_markdown.py) — OpenRouter vision
+openai>=1.0.0
+python-dotenv>=1.0.0
+
+# Web app (Phase 1)
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
