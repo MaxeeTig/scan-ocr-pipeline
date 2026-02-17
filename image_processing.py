@@ -173,14 +173,15 @@ def crop_to_content(
     background_threshold: int = 240,
 ) -> bool:
     """
-    Detect the inner page bounds (excluding dark borders) and crop the image to
-    that rectangle in place. Pixels with value >= background_threshold are
-    treated as "page" (light); we crop to the bounding box of those so that
-    dark borders around the scan are removed. A small margin is added and
-    clamped to image bounds.
+    Remove outer dark borders and inner white margins in one pass. First crop to
+    the bounding box of light pixels (page), then crop to the bounding box of
+    dark pixels (text/content) within that, so both scanner border and
+    left/right/top/bottom white margins are trimmed. Pixels with value >=
+    background_threshold are "page", and < threshold are "content". A small
+    margin is added and clamped to image bounds.
 
-    Returns True if successful. Returns False if no light region found (e.g.
-    fully dark image) or if PIL is not available / processing failed.
+    Returns True if successful. Returns False if no valid region found or if
+    PIL is not available / processing failed.
     """
     try:
         from PIL import Image
@@ -194,21 +195,38 @@ def crop_to_content(
             orig = img.copy()
             gray = img.convert("L")
         w, h = gray.size
-        # Page = light pixels (>= threshold); mask: 1 where page, 0 where border/dark
-        # Cropping to bbox of light pixels removes the dark border and keeps the page + text
-        mask = gray.point(
+        # Step 1: bbox of light pixels (page) → removes dark scanner border
+        mask_page = gray.point(
             lambda v: 1 if v >= background_threshold else 0,
             mode="1",
         )
-        bbox = mask.getbbox()
-        if not bbox:
+        page_bbox = mask_page.getbbox()
+        if not page_bbox:
             return False
-        left, top, right, bottom = bbox
-        # Add margin, clamped to image bounds
-        left = max(0, left - margin_px)
-        top = max(0, top - margin_px)
-        right = min(w, right + margin_px)
-        bottom = min(h, bottom + margin_px)
+        pl, pt, pr, pb = page_bbox
+        if pl >= pr or pt >= pb:
+            return False
+        page_crop = orig.crop((pl, pt, pr, pb))
+        gray_page = page_crop.convert("L")
+        pw, ph = gray_page.size
+        # Step 2: bbox of dark pixels (text) within page → removes white margins
+        mask_content = gray_page.point(
+            lambda v: 0 if v >= background_threshold else 1,
+            mode="1",
+        )
+        content_bbox = mask_content.getbbox()
+        if not content_bbox:
+            return False
+        cl, ct, cr, cb = content_bbox
+        # Map back to original image coordinates and add margin
+        left = pl + max(0, cl - margin_px)
+        top = pt + max(0, ct - margin_px)
+        right = pl + min(pw, cr + margin_px)
+        bottom = pt + min(ph, cb + margin_px)
+        left = max(0, left)
+        top = max(0, top)
+        right = min(w, right)
+        bottom = min(h, bottom)
         if left >= right or top >= bottom:
             return False
         cropped = orig.crop((left, top, right, bottom))

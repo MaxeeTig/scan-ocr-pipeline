@@ -270,7 +270,12 @@ _INDEX_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="step">
-    <label><input type="checkbox" id="optGrayscale" checked> Convert to grayscale</label>
+    <div style="margin-bottom: 0.5rem; font-weight: 600;">Pipeline (auto-run after scan):</div>
+    <label style="display: block; margin: 0.25rem 0;"><input type="checkbox" id="optGrayscale"> Convert to grayscale</label>
+    <label style="display: block; margin: 0.25rem 0;"><input type="checkbox" id="optProcess"> Run process after scan</label>
+    <label style="display: block; margin: 0.25rem 0;"><input type="checkbox" id="optRotate180"> Run rotate 180° after scan</label>
+    <label style="display: block; margin: 0.25rem 0;"><input type="checkbox" id="optDeskew"> Run deskew after scan</label>
+    <label style="display: block; margin: 0.25rem 0;"><input type="checkbox" id="optCropBorders"> Run crop borders after scan</label>
   </div>
   <div class="step">
     <button id="btnScan">Scan</button>
@@ -299,6 +304,143 @@ _INDEX_HTML = """<!DOCTYPE html>
     const btnRotate180 = document.getElementById('btnRotate180');
     const btnDeskew = document.getElementById('btnDeskew');
     const btnCropBorders = document.getElementById('btnCropBorders');
+    const optGrayscale = document.getElementById('optGrayscale');
+    const optProcess = document.getElementById('optProcess');
+    const optRotate180 = document.getElementById('optRotate180');
+    const optDeskew = document.getElementById('optDeskew');
+    const optCropBorders = document.getElementById('optCropBorders');
+
+    // localStorage keys
+    const STORAGE_KEYS = {
+      grayscale: 'scanPipeline_grayscale',
+      process: 'scanPipeline_process',
+      rotate180: 'scanPipeline_rotate180',
+      deskew: 'scanPipeline_deskew',
+      cropBorders: 'scanPipeline_crop'
+    };
+
+    // Load checkbox states from localStorage
+    function loadCheckboxStates() {
+      optGrayscale.checked = localStorage.getItem(STORAGE_KEYS.grayscale) !== 'false';
+      optProcess.checked = localStorage.getItem(STORAGE_KEYS.process) === 'true';
+      optRotate180.checked = localStorage.getItem(STORAGE_KEYS.rotate180) === 'true';
+      optDeskew.checked = localStorage.getItem(STORAGE_KEYS.deskew) === 'true';
+      optCropBorders.checked = localStorage.getItem(STORAGE_KEYS.cropBorders) === 'true';
+    }
+
+    // Save checkbox state to localStorage
+    function saveCheckboxState(key, checked) {
+      localStorage.setItem(key, checked ? 'true' : 'false');
+    }
+
+    // Set up change listeners for all checkboxes
+    optGrayscale.addEventListener('change', () => saveCheckboxState(STORAGE_KEYS.grayscale, optGrayscale.checked));
+    optProcess.addEventListener('change', () => saveCheckboxState(STORAGE_KEYS.process, optProcess.checked));
+    optRotate180.addEventListener('change', () => saveCheckboxState(STORAGE_KEYS.rotate180, optRotate180.checked));
+    optDeskew.addEventListener('change', () => saveCheckboxState(STORAGE_KEYS.deskew, optDeskew.checked));
+    optCropBorders.addEventListener('change', () => saveCheckboxState(STORAGE_KEYS.cropBorders, optCropBorders.checked));
+
+    // Run pipeline steps automatically after scan
+    async function runPipeline(index) {
+      const shouldProcess = optProcess.checked || optRotate180.checked || optDeskew.checked || optCropBorders.checked;
+      
+      if (!shouldProcess) {
+        setMessage('Scanned as spread ' + index + '. Click Process to clean the image.', false);
+        btnProcess.disabled = false;
+        btnRescan.disabled = false;
+        return;
+      }
+
+      // Disable all action buttons during pipeline
+      btnProcess.disabled = true;
+      btnRotate180.disabled = true;
+      btnDeskew.disabled = true;
+      btnCropBorders.disabled = true;
+      btnRescan.disabled = true;
+      btnApprove.disabled = true;
+
+      let cleanedUrl = null;
+      let pipelineError = null;
+
+      // Step 1: Process (if Process checkbox OR any later step is checked)
+      if (shouldProcess) {
+        setMessage('Processing…', false);
+        try {
+          const data = await api('POST', '/api/process', {
+            index: index,
+            to_grayscale: optGrayscale.checked
+          });
+          cleanedUrl = data.url + '?t=' + Date.now();
+          setSpread(index, cleanedUrl);
+          setMessage('Processed. Running pipeline steps…', false);
+        } catch (e) {
+          pipelineError = e.message;
+          setMessage('Process failed: ' + e.message, true);
+          // Re-enable buttons on error
+          btnProcess.disabled = false;
+          btnRescan.disabled = false;
+          return;
+        }
+      }
+
+      // Step 2: Rotate 180° (if checkbox is set)
+      if (!pipelineError && optRotate180.checked && cleanedUrl) {
+        setMessage('Rotating 180°…', false);
+        try {
+          const data = await api('POST', '/api/process/rotate-180', { index: index });
+          cleanedUrl = data.url + '?t=' + Date.now();
+          const img = document.getElementById('cleanedImg');
+          if (img) img.src = cleanedUrl;
+          setMessage('Rotated 180°. Continuing pipeline…', false);
+        } catch (e) {
+          pipelineError = e.message;
+          setMessage('Rotate 180° failed: ' + e.message, true);
+        }
+      }
+
+      // Step 3: Deskew (if checkbox is set)
+      if (!pipelineError && optDeskew.checked && cleanedUrl) {
+        setMessage('Deskewing…', false);
+        try {
+          const data = await api('POST', '/api/process/deskew', { index: index });
+          cleanedUrl = data.url + '?t=' + Date.now();
+          const img = document.getElementById('cleanedImg');
+          if (img) img.src = cleanedUrl;
+          setMessage('Deskewed. Continuing pipeline…', false);
+        } catch (e) {
+          pipelineError = e.message;
+          setMessage('Deskew failed: ' + e.message, true);
+        }
+      }
+
+      // Step 4: Crop borders (if checkbox is set)
+      if (!pipelineError && optCropBorders.checked && cleanedUrl) {
+        setMessage('Cropping borders…', false);
+        try {
+          const data = await api('POST', '/api/process/crop-borders', { index: index });
+          cleanedUrl = data.url + '?t=' + Date.now();
+          const img = document.getElementById('cleanedImg');
+          if (img) img.src = cleanedUrl;
+          setMessage('Cropped borders. Pipeline complete.', false);
+        } catch (e) {
+          pipelineError = e.message;
+          setMessage('Crop borders failed: ' + e.message, true);
+        }
+      }
+
+      // Re-enable buttons based on current state
+      btnProcess.disabled = false;
+      btnRescan.disabled = false;
+      if (cleanedUrl) {
+        btnRotate180.disabled = false;
+        btnDeskew.disabled = false;
+        btnCropBorders.disabled = false;
+        if (!pipelineError) {
+          btnApprove.disabled = false;
+          setMessage('Pipeline complete for spread ' + index + '. Approve or adjust further if needed.', false);
+        }
+      }
+    }
 
     function setMessage(text, isError) {
       message.textContent = text;
@@ -339,11 +481,12 @@ _INDEX_HTML = """<!DOCTYPE html>
         const st = await api('GET', '/api/state', null);
         nextIndexInput.value = st.next_scan_index;
         updateSpreadInfo(st.next_scan_index);
-        setMessage('Scanned as spread ' + data.index + '. Click Process to clean the image.', false);
-        btnProcess.disabled = false;
-        btnRescan.disabled = false;
+        // Run pipeline automatically after scan completes
+        await runPipeline(data.index);
       } catch (e) {
         setMessage(e.message, true);
+        btnProcess.disabled = false;
+        btnRescan.disabled = false;
       }
       btnScan.disabled = false;
     });
@@ -456,6 +599,9 @@ _INDEX_HTML = """<!DOCTYPE html>
     });
 
     (async function init() {
+      // Load checkbox states from localStorage
+      loadCheckboxStates();
+      
       try {
         const st = await api('GET', '/api/state', null);
         nextIndexInput.value = st.next_scan_index;

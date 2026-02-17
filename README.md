@@ -133,12 +133,35 @@ Local web UI for the book-scan pipeline. **Phase 1 is complete.**
 - **Rotate 180°**, **Deskew** (slight skew correction), and **Crop borders** (trim to content rectangle) on the cleaned image; preview updates and file is saved in place.
 - **Approve** or **Rescan** (rescan replaces the current spread’s file). Scan errors show the scanner/subprocess message in the UI.
 
+### Pipeline automation
+
+The web app includes an **auto-run pipeline** feature that streamlines the scanning workflow:
+
+- **Pipeline checkboxes** control which processing steps run automatically after each scan:
+  - **Convert to grayscale** — applies grayscale conversion during processing
+  - **Run process after scan** — automatically processes the scanned image (EXIF + OSD orientation)
+  - **Run rotate 180° after scan** — automatically rotates the image 180° if needed
+  - **Run deskew after scan** — automatically corrects slight rotation/skew
+  - **Run crop borders after scan** — automatically crops to content bounds
+
+- **Automatic sequence**: After scanning completes, the pipeline runs checked steps in order:
+  1. **Process** (if Process checkbox is checked OR any of Rotate/Deskew/Crop is checked)
+  2. **Rotate 180°** (if checkbox is checked)
+  3. **Deskew** (if checkbox is checked)
+  4. **Crop borders** (if checkbox is checked)
+
+- **Settings persistence**: All checkbox states are saved in browser localStorage and restored on page load, so your preferences persist between sessions.
+
+- **Manual controls**: All processing buttons remain available for manual use, allowing you to run individual steps or adjust images after the automatic pipeline completes.
+
 ```powershell
 pip install -r requirements.txt
 uvicorn app:app --reload
 ```
 
-Then open **http://127.0.0.1:8000**. Use **Scan** → **Process** → optionally **Rotate 180°** / **Deskew** / **Crop borders** → **Approve** or **Rescan**.
+Then open **http://127.0.0.1:8000**. 
+
+**Quick start**: Configure your pipeline checkboxes (they persist between sessions), then click **Scan**. The pipeline will automatically process your image according to your settings. You can still use the manual buttons to fine-tune individual steps if needed.
 
 ---
 
