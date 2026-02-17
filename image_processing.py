@@ -165,3 +165,54 @@ def deskew_image(
         return True
     except Exception:
         return False
+
+
+def crop_to_content(
+    image_path: str | Path,
+    margin_px: int = 5,
+    background_threshold: int = 240,
+) -> bool:
+    """
+    Detect the inner page bounds (excluding dark borders) and crop the image to
+    that rectangle in place. Pixels with value >= background_threshold are
+    treated as "page" (light); we crop to the bounding box of those so that
+    dark borders around the scan are removed. A small margin is added and
+    clamped to image bounds.
+
+    Returns True if successful. Returns False if no light region found (e.g.
+    fully dark image) or if PIL is not available / processing failed.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    path = Path(image_path)
+    if not path.is_file():
+        return False
+    try:
+        with Image.open(path) as img:
+            orig = img.copy()
+            gray = img.convert("L")
+        w, h = gray.size
+        # Page = light pixels (>= threshold); mask: 1 where page, 0 where border/dark
+        # Cropping to bbox of light pixels removes the dark border and keeps the page + text
+        mask = gray.point(
+            lambda v: 1 if v >= background_threshold else 0,
+            mode="1",
+        )
+        bbox = mask.getbbox()
+        if not bbox:
+            return False
+        left, top, right, bottom = bbox
+        # Add margin, clamped to image bounds
+        left = max(0, left - margin_px)
+        top = max(0, top - margin_px)
+        right = min(w, right + margin_px)
+        bottom = min(h, bottom + margin_px)
+        if left >= right or top >= bottom:
+            return False
+        cropped = orig.crop((left, top, right, bottom))
+        cropped.save(path, format="PNG", optimize=True)
+        return True
+    except Exception:
+        return False

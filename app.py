@@ -180,6 +180,24 @@ def api_process_deskew(body: ProcessBody) -> dict:
     }
 
 
+@app.post("/api/process/crop-borders")
+def api_process_crop_borders(body: ProcessBody) -> dict:
+    """Crop the cleaned image to content bounds (trim borders) in place. File is updated; preview updates for visual feedback."""
+    index = body.index
+    if index < 1:
+        raise HTTPException(status_code=400, detail="index must be >= 1")
+    cleaned_path = CLEANED_DIR / _spread_filename(index)
+    if not cleaned_path.is_file():
+        raise HTTPException(status_code=404, detail=f"No cleaned image for spread {index}. Process first.")
+    from image_processing import crop_to_content
+    if not crop_to_content(cleaned_path):
+        raise HTTPException(status_code=500, detail="Crop borders failed (no content found or error).")
+    return {
+        "url": f"/api/serve/cleaned/{_spread_filename(index)}",
+        "index": index,
+    }
+
+
 @app.get("/api/serve/scans/{filename}")
 def serve_scans(filename: str) -> FileResponse:
     if not filename.startswith("image_") or not filename.endswith(".png"):
@@ -259,6 +277,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     <button id="btnProcess" disabled>Process</button>
     <button id="btnRotate180" disabled>Rotate 180°</button>
     <button id="btnDeskew" disabled>Deskew</button>
+    <button id="btnCropBorders" disabled>Crop borders</button>
     <button id="btnRescan" disabled>Rescan</button>
     <button id="btnApprove" disabled>Approve</button>
   </div>
@@ -279,6 +298,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     const btnSetIndex = document.getElementById('btnSetIndex');
     const btnRotate180 = document.getElementById('btnRotate180');
     const btnDeskew = document.getElementById('btnDeskew');
+    const btnCropBorders = document.getElementById('btnCropBorders');
 
     function setMessage(text, isError) {
       message.textContent = text;
@@ -289,7 +309,8 @@ _INDEX_HTML = """<!DOCTYPE html>
       currentIndex = index;
       spreadInfo.textContent = 'Spread ' + index;
       btnRotate180.disabled = !cleanedUrl;
-    btnDeskew.disabled = !cleanedUrl;
+      btnDeskew.disabled = !cleanedUrl;
+      btnCropBorders.disabled = !cleanedUrl;
       if (cleanedUrl) {
         imageBox.innerHTML = '<img id="cleanedImg" src="' + cleanedUrl + '" alt="Cleaned spread ' + index + '">';
       } else {
@@ -373,6 +394,21 @@ _INDEX_HTML = """<!DOCTYPE html>
         setMessage(e.message, true);
       }
       btnDeskew.disabled = false;
+    });
+
+    btnCropBorders.addEventListener('click', async () => {
+      if (currentIndex == null) return;
+      btnCropBorders.disabled = true;
+      setMessage('Cropping borders…', false);
+      try {
+        const data = await api('POST', '/api/process/crop-borders', { index: currentIndex });
+        const img = document.getElementById('cleanedImg');
+        if (img) img.src = data.url + '?t=' + Date.now();
+        setMessage('Borders cropped. Approve or adjust further if needed.', false);
+      } catch (e) {
+        setMessage(e.message, true);
+      }
+      btnCropBorders.disabled = false;
     });
 
     btnRescan.addEventListener('click', async () => {

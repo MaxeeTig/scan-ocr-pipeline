@@ -130,7 +130,7 @@ Local web UI for the book-scan pipeline. **Phase 1 is complete.**
 - **Scan** a spread (WIA dialog) → saved as `work/scans/image_001.png`, `image_002.png`, … (sequential).
 - **Set next spread number** to restart from 1 or continue from any index (files stay `image_nnn.png`).
 - **Process** → EXIF + OSD orientation, optional grayscale; output in `work/cleaned/image_nnn.png`.
-- **Rotate 180°** and **Deskew** (slight skew correction) on the cleaned image; preview updates and file is saved in place.
+- **Rotate 180°**, **Deskew** (slight skew correction), and **Crop borders** (trim to content rectangle) on the cleaned image; preview updates and file is saved in place.
 - **Approve** or **Rescan** (rescan replaces the current spread’s file). Scan errors show the scanner/subprocess message in the UI.
 
 ```powershell
@@ -138,7 +138,7 @@ pip install -r requirements.txt
 uvicorn app:app --reload
 ```
 
-Then open **http://127.0.0.1:8000**. Use **Scan** → **Process** → optionally **Rotate 180°** / **Deskew** → **Approve** or **Rescan**.
+Then open **http://127.0.0.1:8000**. Use **Scan** → **Process** → optionally **Rotate 180°** / **Deskew** / **Crop borders** → **Approve** or **Rescan**.
 
 ---
 
