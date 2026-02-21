@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 # Project root (where scan_sample.py and work/ live)
@@ -21,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 WORK_DIR = PROJECT_ROOT / "work"
 SCANS_DIR = WORK_DIR / "scans"
 CLEANED_DIR = WORK_DIR / "cleaned"
+TEXTS_DIR = WORK_DIR / "texts"
 NEXT_INDEX_FILE = WORK_DIR / "next_index.txt"
 
 # Spread index: 3-digit zero-padded
@@ -30,6 +31,7 @@ INDEX_DIGITS = 3
 def _ensure_work_dirs() -> None:
     SCANS_DIR.mkdir(parents=True, exist_ok=True)
     CLEANED_DIR.mkdir(parents=True, exist_ok=True)
+    TEXTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _read_next_index() -> int:
@@ -198,6 +200,30 @@ def api_process_crop_borders(body: ProcessBody) -> dict:
     }
 
 
+@app.post("/api/ocr")
+def api_ocr(body: ProcessBody) -> dict:
+    """Run LLM-based OCR on the cleaned image for the given spread index and save as Markdown."""
+    index = body.index
+    if index < 1:
+        raise HTTPException(status_code=400, detail="index must be >= 1")
+    cleaned_path = CLEANED_DIR / _spread_filename(index)
+    if not cleaned_path.is_file():
+        raise HTTPException(status_code=404, detail=f"No cleaned image for spread {index}. Process first.")
+    output_path = TEXTS_DIR / f"image_{index:0{INDEX_DIGITS}d}.md"
+    try:
+        from llm_ocr_to_markdown import llm_image_to_markdown
+        llm_image_to_markdown(cleaned_path, output_path)
+    except ValueError as e:
+        # API key missing or similar configuration error
+        raise HTTPException(status_code=500, detail=f"OCR configuration error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OCR failed: {e}")
+    return {
+        "path": str(output_path),
+        "index": index,
+    }
+
+
 @app.get("/api/serve/scans/{filename}")
 def serve_scans(filename: str) -> FileResponse:
     if not filename.startswith("image_") or not filename.endswith(".png"):
@@ -216,6 +242,34 @@ def serve_cleaned(filename: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, media_type="image/png")
+
+
+@app.get("/api/cleaned/list")
+def api_cleaned_list() -> dict:
+    """Return sorted list of spread indices that have cleaned images (for Compare tab)."""
+    _ensure_work_dirs()
+    indices: list[int] = []
+    for p in CLEANED_DIR.glob("image_*.png"):
+        try:
+            # image_001.png -> 1
+            num = int(p.stem.split("_", 1)[1])
+            if num >= 1:
+                indices.append(num)
+        except (ValueError, IndexError):
+            continue
+    indices.sort()
+    return {"indices": indices}
+
+
+@app.get("/api/texts/{index}", response_class=PlainTextResponse, response_model=None)
+def api_texts(index: int):
+    """Return markdown content for the given spread index. 404 if no file."""
+    if index < 1:
+        raise HTTPException(status_code=400, detail="index must be >= 1")
+    path = TEXTS_DIR / f"image_{index:0{INDEX_DIGITS}d}.md"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No OCR result for this spread.")
+    return PlainTextResponse(content=path.read_text(encoding="utf-8"))
 
 
 @app.get("/api/state")
@@ -243,10 +297,16 @@ _INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Scan pipeline – Phase 1</title>
+  <title>Scan pipeline – Phase 2</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 1rem auto; padding: 0 1rem; }
+    body { font-family: system-ui, sans-serif; max-width: 1200px; margin: 1rem auto; padding: 0 1rem; }
     h1 { font-size: 1.25rem; }
+    .tab-bar { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 1px solid #ccc; }
+    .tab-bar button { padding: 0.5rem 1rem; border: 1px solid #ccc; border-bottom: none; background: #f5f5f5; cursor: pointer; margin-right: 2px; }
+    .tab-bar button.active { background: #fff; font-weight: 600; margin-bottom: -1px; padding-bottom: calc(0.5rem + 1px); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     .step { margin: 1rem 0; }
     button { padding: 0.5rem 1rem; margin-right: 0.5rem; cursor: pointer; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -256,10 +316,30 @@ _INDEX_HTML = """<!DOCTYPE html>
     .error { color: #c00; }
     .success { color: #060; }
     .setIndex .hint { color: #666; font-size: 0.9rem; margin-left: 0.5rem; }
+    .compare-toolbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+    .compare-toolbar #compareSpreadLabel { font-weight: 600; min-width: 8rem; }
+    .compare-layout { display: flex; gap: 1rem; min-height: 60vh; }
+    .compare-pane { flex: 1; min-width: 0; overflow: auto; }
+    .compare-pane img { max-width: 100%; border: 1px solid #ccc; display: block; }
+    .compare-md { padding: 0.5rem; border: 1px solid #ccc; background: #fafafa; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; max-width: 100%; width: 100%; box-sizing: border-box; display: block; }
+    .compare-md, .compare-md * { word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; hyphens: auto; }
+    .compare-md p, .compare-md li, .compare-md div, .compare-md span { overflow-wrap: break-word; word-break: break-word; max-width: 100%; white-space: normal; }
+    .compare-md h1, .compare-md h2, .compare-md h3, .compare-md h4, .compare-md h5, .compare-md h6 { margin-top: 0.5em; margin-bottom: 0.25em; overflow-wrap: break-word; word-break: break-word; white-space: normal; }
+    .compare-md p { margin: 0.5em 0; }
+    .compare-md ul, .compare-md ol { margin: 0.5em 0; padding-left: 1.5em; }
+    .compare-md pre, .compare-md code { white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; max-width: 100%; }
+    .compare-md-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+    .compare-md-wrap .compare-ocr-row { margin-bottom: 0.5rem; flex-shrink: 0; }
   </style>
 </head>
 <body>
-  <h1>Scan pipeline – Phase 1</h1>
+  <h1>Scan pipeline</h1>
+  <nav class="tab-bar">
+    <button type="button" class="tab-btn active" data-tab="scan">Scan</button>
+    <button type="button" class="tab-btn" data-tab="compare">Compare (OCR)</button>
+  </nav>
+
+  <div id="tab-scan" class="tab-panel active">
   <p id="spreadInfo">Loading…</p>
 
   <div class="step setIndex">
@@ -283,14 +363,52 @@ _INDEX_HTML = """<!DOCTYPE html>
     <button id="btnRotate180" disabled>Rotate 180°</button>
     <button id="btnDeskew" disabled>Deskew</button>
     <button id="btnCropBorders" disabled>Crop borders</button>
+    <button id="btnOCR" disabled>Run OCR</button>
+    <button id="btnBatchOCR" disabled>Batch OCR (current → end)</button>
+    <button id="btnStopBatch" disabled>Stop batch</button>
     <button id="btnRescan" disabled>Rescan</button>
     <button id="btnApprove" disabled>Approve</button>
   </div>
 
   <div id="imageBox"></div>
   <p id="message"></p>
+  </div>
+
+  <div id="tab-compare" class="tab-panel">
+    <div class="compare-toolbar">
+      <button type="button" id="btnComparePrev" disabled>Previous</button>
+      <span id="compareSpreadLabel">Spread 0 of 0</span>
+      <button type="button" id="btnCompareNext" disabled>Next</button>
+      <label style="margin-left: 1rem;"><input type="checkbox" id="compareChecked"> Checked</label>
+    </div>
+    <div class="compare-layout">
+      <div class="compare-pane compare-image-pane">
+        <div id="compareImageBox"></div>
+      </div>
+      <div class="compare-pane compare-md-pane">
+        <div class="compare-md-wrap">
+          <div class="compare-ocr-row">
+            <button type="button" id="btnCompareOCR" disabled>Run OCR</button>
+          </div>
+          <div id="compareMdBox" class="compare-md"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tab = btn.getAttribute('data-tab');
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + tab).classList.add('active');
+        if (tab === 'compare') initCompareTab();
+      });
+    });
+
     let currentIndex = null;
     const spreadInfo = document.getElementById('spreadInfo');
     const imageBox = document.getElementById('imageBox');
@@ -304,11 +422,17 @@ _INDEX_HTML = """<!DOCTYPE html>
     const btnRotate180 = document.getElementById('btnRotate180');
     const btnDeskew = document.getElementById('btnDeskew');
     const btnCropBorders = document.getElementById('btnCropBorders');
+    const btnOCR = document.getElementById('btnOCR');
+    const btnBatchOCR = document.getElementById('btnBatchOCR');
+    const btnStopBatch = document.getElementById('btnStopBatch');
     const optGrayscale = document.getElementById('optGrayscale');
     const optProcess = document.getElementById('optProcess');
     const optRotate180 = document.getElementById('optRotate180');
     const optDeskew = document.getElementById('optDeskew');
     const optCropBorders = document.getElementById('optCropBorders');
+
+    let batchRunning = false;
+    let batchStopRequested = false;
 
     // localStorage keys
     const STORAGE_KEYS = {
@@ -316,7 +440,8 @@ _INDEX_HTML = """<!DOCTYPE html>
       process: 'scanPipeline_process',
       rotate180: 'scanPipeline_rotate180',
       deskew: 'scanPipeline_deskew',
-      cropBorders: 'scanPipeline_crop'
+      cropBorders: 'scanPipeline_crop',
+      compareChecked: 'scanPipeline_compare_checked'
     };
 
     // Load checkbox states from localStorage
@@ -356,6 +481,9 @@ _INDEX_HTML = """<!DOCTYPE html>
       btnRotate180.disabled = true;
       btnDeskew.disabled = true;
       btnCropBorders.disabled = true;
+      btnOCR.disabled = true;
+      btnBatchOCR.disabled = true;
+      btnStopBatch.disabled = true;
       btnRescan.disabled = true;
       btnApprove.disabled = true;
 
@@ -435,6 +563,11 @@ _INDEX_HTML = """<!DOCTYPE html>
         btnRotate180.disabled = false;
         btnDeskew.disabled = false;
         btnCropBorders.disabled = false;
+        if (!batchRunning) {
+          btnOCR.disabled = false;
+          btnBatchOCR.disabled = false;
+          btnStopBatch.disabled = true;
+        }
         if (!pipelineError) {
           btnApprove.disabled = false;
           setMessage('Pipeline complete for spread ' + index + '. Approve or adjust further if needed.', false);
@@ -453,6 +586,9 @@ _INDEX_HTML = """<!DOCTYPE html>
       btnRotate180.disabled = !cleanedUrl;
       btnDeskew.disabled = !cleanedUrl;
       btnCropBorders.disabled = !cleanedUrl;
+      btnOCR.disabled = batchRunning || !cleanedUrl;
+      btnBatchOCR.disabled = batchRunning || !cleanedUrl;
+      btnStopBatch.disabled = !batchRunning;
       if (cleanedUrl) {
         imageBox.innerHTML = '<img id="cleanedImg" src="' + cleanedUrl + '" alt="Cleaned spread ' + index + '">';
       } else {
@@ -554,6 +690,133 @@ _INDEX_HTML = """<!DOCTYPE html>
       btnCropBorders.disabled = false;
     });
 
+    btnOCR.addEventListener('click', async () => {
+      if (currentIndex == null) return;
+      btnOCR.disabled = true;
+      setMessage('Running OCR…', false);
+      try {
+        await api('POST', '/api/ocr', { index: currentIndex });
+        setMessage('OCR complete. Switching to Compare tab…', false);
+        btnOCR.disabled = false;
+        btnBatchOCR.disabled = false;
+        // Switch to Compare tab
+        const compareTabBtn = document.querySelector('.tab-btn[data-tab="compare"]');
+        if (compareTabBtn) {
+          compareTabBtn.click();
+          // Wait a bit for tab to initialize, then find and load the current spread
+          setTimeout(async () => {
+            if (compareIndices === null) {
+              try {
+                const data = await api('GET', '/api/cleaned/list', null);
+                compareIndices = data.indices || [];
+              } catch (e) {
+                compareIndices = [];
+              }
+            }
+            if (compareIndices.length > 0) {
+              const pos = compareIndices.indexOf(currentIndex);
+              if (pos >= 0) {
+                comparePosition = pos;
+                await loadCompareSpread(currentIndex);
+                updateCompareToolbar();
+              } else {
+                // If current index not in list, refresh list and try again
+                const data = await api('GET', '/api/cleaned/list', null);
+                compareIndices = data.indices || [];
+                if (compareIndices.length > 0) {
+                  const pos = compareIndices.indexOf(currentIndex);
+                  if (pos >= 0) {
+                    comparePosition = pos;
+                    await loadCompareSpread(currentIndex);
+                    updateCompareToolbar();
+                  }
+                }
+              }
+            }
+          }, 100);
+        }
+      } catch (e) {
+        setMessage(e.message, true);
+        btnOCR.disabled = false;
+        btnBatchOCR.disabled = false;
+      }
+    });
+
+    btnBatchOCR.addEventListener('click', async () => {
+      if (currentIndex == null) return;
+      let indices = [];
+      try {
+        const data = await api('GET', '/api/cleaned/list', null);
+        indices = data.indices || [];
+      } catch (e) {
+        setMessage('Could not load cleaned list: ' + e.message, true);
+        return;
+      }
+      const indicesToRun = indices.filter(i => i >= currentIndex);
+      if (indicesToRun.length === 0) {
+        setMessage('No spreads to the right with cleaned images.', false);
+        return;
+      }
+      batchStopRequested = false;
+      batchRunning = true;
+      btnOCR.disabled = true;
+      btnBatchOCR.disabled = true;
+      btnStopBatch.disabled = false;
+      let stopped = false;
+      let lastIndex = null;
+      for (let i = 0; i < indicesToRun.length; i++) {
+        const idx = indicesToRun[i];
+        lastIndex = idx;
+        setMessage('OCR spread ' + idx + ' (' + (i + 1) + '/' + indicesToRun.length + ')…', false);
+        try {
+          await api('POST', '/api/ocr', { index: idx });
+        } catch (e) {
+          setMessage('OCR failed at spread ' + idx + ': ' + e.message, true);
+          stopped = true;
+          break;
+        }
+        if (batchStopRequested) {
+          setMessage('Batch stopped after spread ' + idx + '.', false);
+          stopped = true;
+          break;
+        }
+      }
+      batchRunning = false;
+      batchStopRequested = false;
+      btnStopBatch.disabled = true;
+      const img = document.getElementById('cleanedImg');
+      const hasCleaned = !!img && !!img.src;
+      btnOCR.disabled = !hasCleaned;
+      btnBatchOCR.disabled = !hasCleaned;
+      if (!stopped) {
+        setMessage('Batch complete. Switching to Compare tab…', false);
+        const compareTabBtn = document.querySelector('.tab-btn[data-tab="compare"]');
+        if (compareTabBtn) {
+          compareTabBtn.click();
+          setTimeout(async () => {
+            if (compareIndices === null) {
+              try {
+                const data = await api('GET', '/api/cleaned/list', null);
+                compareIndices = data.indices || [];
+              } catch (e) {
+                compareIndices = [];
+              }
+            }
+            if (compareIndices.length > 0) {
+              const pos = lastIndex != null ? compareIndices.indexOf(lastIndex) : 0;
+              comparePosition = pos >= 0 ? pos : compareIndices.length - 1;
+              await loadCompareSpread(compareIndices[comparePosition]);
+              updateCompareToolbar();
+            }
+          }, 100);
+        }
+      }
+    });
+
+    btnStopBatch.addEventListener('click', () => {
+      batchStopRequested = true;
+    });
+
     btnRescan.addEventListener('click', async () => {
       if (currentIndex == null) return;
       btnRescan.disabled = true;
@@ -596,6 +859,150 @@ _INDEX_HTML = """<!DOCTYPE html>
       } catch (e) {
         setMessage(e.message, true);
       }
+    });
+
+    // --- Compare (OCR) tab ---
+    let compareIndices = null;
+    let comparePosition = null;
+    const btnComparePrev = document.getElementById('btnComparePrev');
+    const btnCompareNext = document.getElementById('btnCompareNext');
+    const btnCompareOCR = document.getElementById('btnCompareOCR');
+    const compareSpreadLabel = document.getElementById('compareSpreadLabel');
+    const compareImageBox = document.getElementById('compareImageBox');
+    const compareMdBox = document.getElementById('compareMdBox');
+    const compareCheckedBox = document.getElementById('compareChecked');
+
+    function getCompareCheckedSet() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEYS.compareChecked);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+      } catch (e) { return []; }
+    }
+
+    function saveCompareCheckedSet(ids) {
+      localStorage.setItem(STORAGE_KEYS.compareChecked, JSON.stringify(ids));
+    }
+
+    function updateCompareCheckedCheckbox() {
+      if (!compareIndices || compareIndices.length === 0) return;
+      const currentId = compareIndices[comparePosition];
+      compareCheckedBox.checked = getCompareCheckedSet().indexOf(currentId) >= 0;
+    }
+
+    function padIndex(n) {
+      return String(n).padStart(3, '0');
+    }
+
+    async function loadCompareSpread(index) {
+      const filename = 'image_' + padIndex(index) + '.png';
+      compareImageBox.innerHTML = '<img src="/api/serve/cleaned/' + filename + '?t=' + Date.now() + '" alt="Spread ' + index + '">';
+      try {
+        const r = await fetch('/api/texts/' + index);
+        const text = await r.text();
+        if (r.ok) {
+          compareMdBox.textContent = text;
+          compareMdBox.classList.remove('no-ocr');
+        } else {
+          compareMdBox.textContent = 'No OCR result for this spread.';
+          compareMdBox.classList.add('no-ocr');
+        }
+      } catch (e) {
+        compareMdBox.textContent = 'No OCR result for this spread.';
+        compareMdBox.classList.add('no-ocr');
+      }
+    }
+
+    function updateCompareToolbar() {
+      if (compareIndices.length === 0) {
+        btnCompareOCR.disabled = true;
+        return;
+      }
+      const n = compareIndices[comparePosition];
+      const m = compareIndices.length;
+      compareSpreadLabel.textContent = 'Spread ' + n + ' of ' + m;
+      btnComparePrev.disabled = comparePosition === 0;
+      btnCompareNext.disabled = comparePosition === compareIndices.length - 1;
+      btnCompareOCR.disabled = false;
+      updateCompareCheckedCheckbox();
+    }
+
+    async function initCompareTab() {
+      if (compareIndices === null) {
+        try {
+          const data = await api('GET', '/api/cleaned/list', null);
+          compareIndices = data.indices || [];
+        } catch (e) {
+          compareIndices = [];
+        }
+      }
+      if (compareIndices.length === 0) {
+        compareSpreadLabel.textContent = 'No spreads';
+        compareImageBox.innerHTML = '<p>No cleaned images. Use Scan tab first.</p>';
+        compareMdBox.textContent = '';
+        btnComparePrev.disabled = true;
+        btnCompareNext.disabled = true;
+        btnCompareOCR.disabled = true;
+        return;
+      }
+      if (comparePosition === null) {
+        const checkedSet = getCompareCheckedSet();
+        let firstUnchecked = null;
+        for (let i = 0; i < compareIndices.length; i++) {
+          if (checkedSet.indexOf(compareIndices[i]) < 0) {
+            firstUnchecked = i;
+            break;
+          }
+        }
+        comparePosition = firstUnchecked !== null ? firstUnchecked : 0;
+      }
+      await loadCompareSpread(compareIndices[comparePosition]);
+      updateCompareToolbar();
+    }
+
+    btnComparePrev.addEventListener('click', () => {
+      if (compareIndices === null || comparePosition <= 0) return;
+      comparePosition--;
+      loadCompareSpread(compareIndices[comparePosition]);
+      updateCompareToolbar();
+    });
+
+    btnCompareNext.addEventListener('click', () => {
+      if (compareIndices === null || comparePosition >= compareIndices.length - 1) return;
+      comparePosition++;
+      loadCompareSpread(compareIndices[comparePosition]);
+      updateCompareToolbar();
+    });
+
+    compareCheckedBox.addEventListener('change', () => {
+      if (compareIndices === null || compareIndices.length === 0) return;
+      const currentId = compareIndices[comparePosition];
+      const set = getCompareCheckedSet();
+      const idx = set.indexOf(currentId);
+      if (compareCheckedBox.checked) {
+        if (idx < 0) set.push(currentId);
+      } else {
+        if (idx >= 0) set.splice(idx, 1);
+      }
+      saveCompareCheckedSet(set);
+    });
+
+    btnCompareOCR.addEventListener('click', async () => {
+      if (compareIndices === null || comparePosition === null || compareIndices.length === 0) return;
+      const currentSpreadIndex = compareIndices[comparePosition];
+      btnCompareOCR.disabled = true;
+      compareMdBox.textContent = 'Running OCR…';
+      compareMdBox.classList.add('no-ocr');
+      try {
+        await api('POST', '/api/ocr', { index: currentSpreadIndex });
+        // Reload the markdown for the current spread
+        await loadCompareSpread(currentSpreadIndex);
+      } catch (e) {
+        compareMdBox.textContent = 'OCR failed: ' + e.message;
+        compareMdBox.classList.add('no-ocr');
+      }
+      btnCompareOCR.disabled = false;
     });
 
     (async function init() {
