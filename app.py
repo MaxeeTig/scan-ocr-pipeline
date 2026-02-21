@@ -389,6 +389,8 @@ _INDEX_HTML = """<!DOCTYPE html>
         <div class="compare-md-wrap">
           <div class="compare-ocr-row">
             <button type="button" id="btnCompareOCR" disabled>Run OCR</button>
+            <button type="button" id="btnCompareBatchOCR" disabled>Batch OCR (current → end)</button>
+            <button type="button" id="btnCompareStopBatch" disabled>Stop batch</button>
           </div>
           <div id="compareMdBox" class="compare-md"></div>
         </div>
@@ -864,9 +866,12 @@ _INDEX_HTML = """<!DOCTYPE html>
     // --- Compare (OCR) tab ---
     let compareIndices = null;
     let comparePosition = null;
+    let compareBatchRunning = false;
     const btnComparePrev = document.getElementById('btnComparePrev');
     const btnCompareNext = document.getElementById('btnCompareNext');
     const btnCompareOCR = document.getElementById('btnCompareOCR');
+    const btnCompareBatchOCR = document.getElementById('btnCompareBatchOCR');
+    const btnCompareStopBatch = document.getElementById('btnCompareStopBatch');
     const compareSpreadLabel = document.getElementById('compareSpreadLabel');
     const compareImageBox = document.getElementById('compareImageBox');
     const compareMdBox = document.getElementById('compareMdBox');
@@ -915,8 +920,10 @@ _INDEX_HTML = """<!DOCTYPE html>
     }
 
     function updateCompareToolbar() {
-      if (compareIndices.length === 0) {
+      if (!compareIndices || compareIndices.length === 0) {
         btnCompareOCR.disabled = true;
+        btnCompareBatchOCR.disabled = true;
+        btnCompareStopBatch.disabled = true;
         return;
       }
       const n = compareIndices[comparePosition];
@@ -924,7 +931,15 @@ _INDEX_HTML = """<!DOCTYPE html>
       compareSpreadLabel.textContent = 'Spread ' + n + ' of ' + m;
       btnComparePrev.disabled = comparePosition === 0;
       btnCompareNext.disabled = comparePosition === compareIndices.length - 1;
-      btnCompareOCR.disabled = false;
+      if (compareBatchRunning) {
+        btnCompareOCR.disabled = true;
+        btnCompareBatchOCR.disabled = true;
+        btnCompareStopBatch.disabled = false;
+      } else {
+        btnCompareOCR.disabled = false;
+        btnCompareBatchOCR.disabled = false;
+        btnCompareStopBatch.disabled = true;
+      }
       updateCompareCheckedCheckbox();
     }
 
@@ -944,6 +959,8 @@ _INDEX_HTML = """<!DOCTYPE html>
         btnComparePrev.disabled = true;
         btnCompareNext.disabled = true;
         btnCompareOCR.disabled = true;
+        btnCompareBatchOCR.disabled = true;
+        btnCompareStopBatch.disabled = true;
         return;
       }
       if (comparePosition === null) {
@@ -1003,6 +1020,61 @@ _INDEX_HTML = """<!DOCTYPE html>
         compareMdBox.classList.add('no-ocr');
       }
       btnCompareOCR.disabled = false;
+    });
+
+    btnCompareBatchOCR.addEventListener('click', async () => {
+      if (compareIndices === null || comparePosition === null || compareIndices.length === 0) return;
+      const currentSpreadIndex = compareIndices[comparePosition];
+      let indices = [];
+      try {
+        const data = await api('GET', '/api/cleaned/list', null);
+        indices = data.indices || [];
+      } catch (e) {
+        compareMdBox.textContent = 'Could not load cleaned list: ' + e.message;
+        compareMdBox.classList.add('no-ocr');
+        return;
+      }
+      const pos = indices.indexOf(currentSpreadIndex);
+      if (pos < 0) {
+        compareMdBox.textContent = 'No cleaned image for current spread.';
+        compareMdBox.classList.add('no-ocr');
+        return;
+      }
+      const indicesToRun = indices.slice(pos);
+      batchStopRequested = false;
+      compareBatchRunning = true;
+      updateCompareToolbar();
+      let stopped = false;
+      const currentViewIndex = compareIndices[comparePosition];
+      for (let i = 0; i < indicesToRun.length; i++) {
+        const idx = indicesToRun[i];
+        compareMdBox.textContent = 'OCR spread ' + idx + ' (' + (i + 1) + '/' + indicesToRun.length + ')…';
+        compareMdBox.classList.add('no-ocr');
+        try {
+          await api('POST', '/api/ocr', { index: idx });
+        } catch (e) {
+          const isMissing = e.message && e.message.indexOf('No cleaned image') >= 0;
+          compareMdBox.textContent = isMissing ? 'No cleaned image for spread ' + idx + '.' : 'OCR failed at spread ' + idx + ': ' + e.message;
+          compareMdBox.classList.add('no-ocr');
+          stopped = true;
+          break;
+        }
+        if (batchStopRequested) {
+          compareMdBox.textContent = 'Batch stopped after spread ' + idx + '.';
+          compareMdBox.classList.add('no-ocr');
+          stopped = true;
+          break;
+        }
+      }
+      compareBatchRunning = false;
+      batchStopRequested = false;
+      updateCompareToolbar();
+      await loadCompareSpread(currentViewIndex);
+      updateCompareToolbar();
+    });
+
+    btnCompareStopBatch.addEventListener('click', () => {
+      batchStopRequested = true;
     });
 
     (async function init() {
